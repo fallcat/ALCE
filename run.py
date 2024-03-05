@@ -18,6 +18,7 @@ import yaml
 from utils import *
 from nltk import sent_tokenize
 
+
 def remove_citations(sent):
     return re.sub(r"\[\d+", "", re.sub(r" \[\d+", "", sent)).replace(" |", "").replace("]", "")
 

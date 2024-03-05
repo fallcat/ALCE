@@ -9,9 +9,19 @@ import numpy as np
 import string
 import torch
 from searcher import SearcherWithinDocs
+import nltk
+nltk.download('punkt')
 
 def remove_citations(sent):
     return re.sub(r"\[\d+", "", re.sub(r" \[\d+", "", sent)).replace(" |", "").replace("]", "")
+
+def find_external_docs_idx(question, external):
+    # find the index of externaol doc that matches the question
+    for idx, item in enumerate(external):
+        if item['question'] == question:
+            return idx
+    return None
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -36,8 +46,14 @@ def main():
     for idx, item in enumerate(tqdm(data['data'])):
         doc_list = item['docs']
         if args.external_docs is not None:
-            assert external[idx]['question'] == item['question']
-            doc_list = external[idx]['docs']
+            # assert external[idx]['question'] == item['question']
+            # doc_list = external[idx]['docs']
+            # import pdb; pdb.set_trace()
+            # if external[idx]['question'] != item['question']:
+            #     continue
+            external_idx = find_external_docs_idx(item['question'], external)
+            doc_list = external[external_idx]['docs']
+            
         searcher = SearcherWithinDocs(doc_list, args.retriever, model=gtr_model, device=args.retriever_device)
         
         output = item["output"].strip().split("\n")[0] # Remove new lines and content after
