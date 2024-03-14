@@ -117,7 +117,7 @@ def _run_nli_autoais(passage, claim):
     inference = 1 if result == "1" else 0
     return inference
 
-def compute_autoais_single(sent, docs):
+def compute_autoais_single(sent, docs, verbose=0):
     """
     Compute AutoAIS score.
 
@@ -136,7 +136,8 @@ def compute_autoais_single(sent, docs):
         autoais_model = AutoModelForSeq2SeqLM.from_pretrained(AUTOAIS_MODEL, torch_dtype=torch.bfloat16, max_memory=get_max_memory(), device_map="auto")
         autoais_tokenizer = AutoTokenizer.from_pretrained(AUTOAIS_MODEL, use_fast=False)
 
-    logger.info(f"Running AutoAIS...")
+    if verbose:
+        logger.info(f"Running AutoAIS...")
 
     def _format_document(doc):
         """Format document for AutoAIS."""

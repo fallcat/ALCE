@@ -30,8 +30,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from collections import namedtuple, defaultdict
 
 
-CompletionOutput = namedtuple("CompletionOutput", ["output_text", "completion_output"])
-
+SOPROMPT_DOC_MODES = ['retrieved', 'postcited', 'comb', 'none']
+SOPROMPT_PRED_MODES = ['docs', 'groups']
 
 class SoPrompt():
     def __init__(self, 
@@ -72,10 +72,17 @@ class SoPrompt():
         get_prompt=None,
         get_closedbook_prompt=None
     ):
+        ndoc = self.args.ndoc
+        if self.args.no_doc_in_demo:
+            ndoc = 0
+        elif self.args.fewer_doc_in_demo:
+            assert self.args.ndoc_in_demo is not None
+            ndoc = self.args.ndoc_in_demo
+        self.ndoc = ndoc
         if get_groupgen_prompt is None:
             def get_groupgen_prompt(eval_item, test=False):
                 groupgen_prompt = make_demo_groupgen(
-                    eval_item, prompt=self.prompt_data["groupgen_prompt"], ndoc=self.args.ndoc, 
+                    eval_item, prompt=self.prompt_data["groupgen_prompt"], ndoc=ndoc, 
                     doc_prompt=self.prompt_data["doc_prompt"],
                     groupgen_instruction=self.prompt_data["groupgen_instruction"], 
                     group_prompt=self.prompt_data["group_prompt"],
@@ -97,12 +104,6 @@ class SoPrompt():
         
         if get_prompt is None:
             def get_prompt(eval_item, test=False):
-                ndoc = self.args.ndoc
-                if self.args.no_doc_in_demo:
-                    ndoc = 0
-                elif self.args.fewer_doc_in_demo:
-                    assert self.args.ndoc_in_demo is not None
-                    ndoc = self.args.ndoc_in_demo
                 prompt = make_demo(
                     eval_item, prompt=self.prompt_data["demo_prompt"], ndoc=ndoc, 
                     doc_prompt=self.prompt_data["doc_prompt"], 
@@ -114,12 +115,6 @@ class SoPrompt():
         
         if get_closedbook_prompt is None:
             def get_closedbook_prompt(eval_item, test=False):
-                ndoc = self.args.ndoc
-                if self.args.no_doc_in_demo:
-                    ndoc = 0
-                elif self.args.fewer_doc_in_demo:
-                    assert self.args.ndoc_in_demo is not None
-                    ndoc = self.args.ndoc_in_demo
                 prompt = make_demo(
                     eval_item, prompt=self.prompt_data["closedbook_prompt"], ndoc=0, 
                     doc_prompt=self.prompt_data["doc_prompt"], 
@@ -131,10 +126,7 @@ class SoPrompt():
         
     def init_head_prompts(self):
         # Generate the demonstration part
-        head_prompt = ""
-        head_groupgen_prompt = ""
-        head_grouppred_prompt = ""
-        head_closedbook_prompt = ""
+        head_prompt, head_groupgen_prompt, head_grouppred_prompt, head_closedbook_prompt = "", "", "", ""
         train_ids = np.random.choice(len(self.prompt_data["demos"]), self.args.shot, replace=False)
         for train_id in train_ids:
             train_item = self.prompt_data["demos"][train_id]
@@ -144,91 +136,96 @@ class SoPrompt():
             elif self.args.fewer_doc_in_demo:
                 assert self.args.ndoc_in_demo is not None
                 ndoc = self.args.ndoc_in_demo
-            head_prompt += self.get_prompt(train_item)
-            head_groupgen_prompt += self.get_groupgen_prompt(train_item)
-            head_grouppred_prompt += self.get_grouppred_prompt(train_item)
-            head_closedbook_prompt += self.get_closedbook_prompt(train_item)
-            head_prompt += self.prompt_data["demo_sep"]
-            head_groupgen_prompt += self.prompt_data["demo_sep"]
-            head_grouppred_prompt += self.prompt_data["demo_sep"]
-            head_closedbook_prompt += self.prompt_data["demo_sep"]
+            head_prompt += self.get_prompt(train_item) + self.prompt_data["demo_sep"]
+            head_groupgen_prompt += self.get_groupgen_prompt(train_item) + self.prompt_data["demo_sep"]
+            head_grouppred_prompt += self.get_grouppred_prompt(train_item) + self.prompt_data["demo_sep"]
+            head_closedbook_prompt += self.get_closedbook_prompt(train_item) + self.prompt_data["demo_sep"]
         self.head_prompt = head_prompt
         self.head_groupgen_prompt = head_groupgen_prompt
         self.head_grouppred_prompt = head_grouppred_prompt
         self.head_closedbook_prompt = head_closedbook_prompt
     
-    def generate(self, data, mode='groupgen_pred', return_dict=False, external=None):
-        assert mode in ['vanilla', 'groupgen_pred', 'closedbook', 'closedbook_postcite',
-                        'closedbook_postcite_repred']
+    def generate(self, data, doc_mode='retrieved', pred_mode='docs', 
+                 return_dict=False, external=None):
+        assert doc_mode in SOPROMPT_DOC_MODES
+        assert pred_mode in SOPROMPT_PRED_MODES
         data = copy.deepcopy(data)
-        
-        if mode == 'groupgen_pred':
-            data = self.groupgen_pred(data)
-            generation = data['generation']
-        elif mode == 'closedbook':
-            results = self.closedbook_predict(data)
-            generation = results['generation']
-        elif mode == 'closedbook_postcite':
+        data['doc_mode'] = doc_mode
+        data['pred_mode'] = pred_mode
+        data['ndoc'] = self.ndoc
+
+        # DOCUMENT
+        # What document to use? Retrieved, or ones generated by post-hoc citation? 
+        # Or post-hoc citation that has the best entailment recall score appended to retrieved?
+        if doc_mode in ['postcited', 'comb', 'none']:
             closedbook_output = self.closedbook_predict(data)
             closedbook_output['closedbook_generation'] = closedbook_output['generation']
             data.update(closedbook_output)
-            results = self.add_posthoc_cite(closedbook_output['generation'], 
-                                               data['question'],
-                                               external)
-            data['generation'] = results['postcite_generation']
-        elif mode == 'closedbook_postcite_repred':
-            closedbook_output = self.closedbook_predict(data)
-            closedbook_output['closedbook_generation'] = closedbook_output['generation']
-            results = self.add_posthoc_cite(closedbook_output['generation'], 
-                                               data['question'],
-                                               external)
-            # import pdb; pdb.set_trace()
-            sents = results['postcite_sents']
-            docs = results['postcite_best_docs']
-            ais_results = defaultdict(list)
-            docs_entail = []
-            for sent, doc in zip(sents, docs):
-                ais_results_single = compute_autoais_single(sent, [doc])
-                # import pdb; pdb.set_trace()
-                ais_results['entail'].append(ais_results_single['entail'])
-                ais_results['entail_prec'].append(ais_results_single['entail_prec'])
-                if ais_results_single['entail'] > 0:
-                    docs_entail.append(doc)
-            data['original_docs'] = copy.deepcopy(data['docs'])
-            data['posthoc_docs'] = copy.deepcopy(docs_entail)
-            new_docs = docs_entail
-            for doc in data['docs']:
-                if doc['text'] not in [doc_['text'] for doc_ in new_docs]:
-                    new_docs.append(doc)
-            data['docs'] = new_docs # First put the docs that are retrieved. #docs_entail + data['docs']
-            data['entail'] = ais_results['entail']
-            data['entail_prec'] = ais_results['entail_prec']
-            
-            data = self.groupgen_pred(data)
+            results = self.add_postcite(closedbook_output['generation'], 
+                                        data['question'],
+                                        external)
             data.update(results)
-        else: # vanilla
+            if doc_mode == 'none':
+                data['generation'] = results['postcite_generation']
+                if return_dict:
+                    return data
+                else:
+                    return data['generation']
+            else: # postcited
+                if doc_mode == 'postcited':
+                    data['docs'] = data['postcite_best_docs']
+                else:
+                    result = self.select_postcite(data)
+                    data.update(result)
+            
+        # PREDICTION
+        # What to predict on? From the documents, or from the groups?
+        if pred_mode == 'docs':
             results = self.backbone_predict(data)
             data.update(results)
+        elif pred_mode == 'groups':
+            data = self.groupgen_pred(data)
+        else:
+            raise ValueError(f"pred_mode {pred_mode} not recognized")
 
+        # Return the results
         if return_dict:
             return data
         else:
             return data['generation']
+
+    def select_postcite(self, data):
+        sents = data['postcite_sents']
+        docs = data['postcite_best_docs']
+        results = {}
+        ais_results = defaultdict(list)
+        docs_entail = []
+        for sent, doc in zip(sents, docs):
+            ais_results_single = compute_autoais_single(sent, [doc])
+            # import pdb; pdb.set_trace()
+            ais_results['entail'].append(ais_results_single['entail'])
+            ais_results['entail_prec'].append(ais_results_single['entail_prec'])
+            if ais_results_single['entail'] > 0:
+                docs_entail.append(doc)
+        results['original_docs'] = copy.deepcopy(data['docs'])
+        results['postcite_docs'] = copy.deepcopy(docs_entail)
+        new_docs = docs_entail
+        num_new_used = len(docs_entail)
+        num_postcite_overlap = 0
+        for di, doc in enumerate(data['docs']):
+            if doc['text'] not in [doc_['text'] for doc_ in new_docs]:
+                new_docs.append(doc)
+            else:
+                if di < self.ndoc:
+                    num_postcite_overlap += 1
+        results['docs'] = new_docs # First put the docs that are retrieved. #docs_entail + data['docs']
+        results['entail'] = ais_results['entail']
+        results['entail_prec'] = ais_results['entail_prec']
+        results['num_new_used'] = num_new_used
+        results['num_postcite_overlap'] = num_postcite_overlap
+        return results
     
-    def groupgen_pred(self, data):
-        groupgen_output = self.group_gen(data)
-        groups = groupgen_output['groups']
-        data['groups'] = groupgen_output['groups']
-        data['groups_str'] = groupgen_output['generation']
-        data['groupgen_prompt'] = groupgen_output['prompt']
-        data['groupgen_prompt_len'] = groupgen_output['prompt_len']
-        grouppred_output = self.group_predict(data)
-        data['generation'] = grouppred_output['generation']
-        data['grouppred_prompt'] = grouppred_output['prompt']
-        data['grouppred_prompt_len'] = grouppred_output['prompt_len']
-        return data
-    
-    def add_posthoc_cite(self, prev_generation, question, external):
+    def add_postcite(self, prev_generation, question, external):
         external_idx = find_external_docs_idx(question, external)
         doc_list = external[external_idx]['docs']
         searcher = SearcherWithinDocs(doc_list, self.args.retriever, 
@@ -303,3 +300,16 @@ class SoPrompt():
         grouppred_prompt = self.head_grouppred_prompt + self.get_grouppred_prompt(data, test=True)
         results = self.llm_predict(grouppred_prompt)
         return results
+
+    def groupgen_pred(self, data):
+        groupgen_output = self.group_gen(data)
+        groups = groupgen_output['groups']
+        data['groups'] = groupgen_output['groups']
+        data['groups_str'] = groupgen_output['generation']
+        data['groupgen_prompt'] = groupgen_output['prompt']
+        data['groupgen_prompt_len'] = groupgen_output['prompt_len']
+        grouppred_output = self.group_predict(data)
+        data['generation'] = grouppred_output['generation']
+        data['grouppred_prompt'] = grouppred_output['prompt']
+        data['grouppred_prompt_len'] = grouppred_output['prompt_len']
+        return data
